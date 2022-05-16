@@ -2,8 +2,8 @@ import torch
 import os
 
 ckpt_root_dir = '/tmp2/b07902050/multidoc2dial-mtl/ckpt'
-model_path = os.path.join(ckpt_root_dir, 'rag-dpr-all-structure-mtl/pytorch_model.bin')
-save_path = os.path.join(ckpt_root_dir, 'rag-dpr-all-structure/pytorch_model.bin')
+save_path = os.path.join(ckpt_root_dir, 'rag-dpr-all-structure-mtl/pytorch_model.bin')
+model_path = os.path.join(ckpt_root_dir, 'rag-dpr-all-structure/pytorch_model.bin')
 decoder_prefix = 'rag.generator.model.decoder'
 grounding_decoder_prefix = 'rag.generator.model.grounding_decoder'
 generation_decoder_prefix = 'rag.generator.model.generation_decoder'
