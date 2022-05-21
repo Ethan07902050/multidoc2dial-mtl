@@ -520,7 +520,7 @@ def main(args):
                     preds_file.write("\n".join(answers))
                     preds_file.flush()
             else:
-                for line in tqdm(eval_file):
+                for line in tqdm(eval_file, total=4201):
                     question = line.strip()
                     questions.append(question)
                     if len(questions) == args.eval_batch_size:

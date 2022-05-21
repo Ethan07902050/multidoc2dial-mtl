@@ -15,6 +15,7 @@ import torch
 import torch.distributed as dist
 from pytorch_lightning.accelerators.ddp_accelerator import DDPAccelerator
 from pytorch_lightning.cluster_environments import TorchElasticEnvironment
+from pytorch_lightning.callbacks import LearningRateMonitor
 from torch.utils.data import DataLoader
 
 from transformers import (
@@ -51,6 +52,7 @@ from dialdoc.models.rag.configuration_rag_dialdoc import DialDocRagConfig
 from utils_rag import (
     calculate_exact_match,
     calculate_bleu,
+    f1_score,
     flatten_list,
     is_rag_model,
     lmap,
@@ -112,8 +114,8 @@ class CustomAccel(DDPAccelerator):
 class GenerativeQAModule(BaseTransformer):
     mode = "generative_qa"
     loss_names = ["grounding_loss", "generation_loss"]
-    metric_names = ["em", "bleu"]
-    val_metric = "em"
+    metric_names = ["em", "bleu", "f1"]
+    val_metric = "generation_em"
 
     def __init__(self, hparams, **kwargs):
         # when loading from a pytorch lightning checkpoint, hparams are passed as dict
@@ -317,17 +319,30 @@ class GenerativeQAModule(BaseTransformer):
         return self._generative_step(batch)
 
     def validation_epoch_end(self, outputs, prefix="val") -> Dict:
+        metrics = {'step_count': self.global_step}
         for task in TASKS:
             file_path = self.output_dir / f'{task}_step_{self.global_step}_preds.txt'
             with file_path.open(mode='w') as f:
                 for x in outputs:
-                    for line in x[task]:
+                    for line in x[f'{task}_preds']:
                         f.write(f'{line}\n')
+
+            for metric in self.metric_names:
+                key = f'{task}_{metric}'
+                metrics[key] = np.mean([x[key] for x in outputs])
+
+        self.save_metrics(metrics, prefix)
 
     def calc_generative_metrics(self, preds, target) -> Dict:
         d_metrics = calculate_exact_match(preds, target)
         d_metrics.update(calculate_bleu(preds, target))
+        f1 = sum([f1_score(p, t) for p, t in zip(preds, target)])
+        d_metrics['f1'] = f1 / len(preds)
         return d_metrics
+
+    def save_metrics(self, latest_metrics, type_path) -> None:
+        self.metrics[type_path].append(latest_metrics)
+        save_json(self.metrics, self.metrics_save_path)
 
     def _generative_step(self, batch: dict) -> dict:
         # start_time = time.time()
@@ -352,19 +367,20 @@ class GenerativeQAModule(BaseTransformer):
         base_metrics = {name: loss for name, loss in zip(self.loss_names, loss_tensors)}
         self.log_dict(base_metrics)
 
-        pred_dict = {}
+        gen_dict = {}
         for task in TASKS:
             # gen_time = (time.time() - start_time) / batch["input_ids"].shape[0]
             preds: List[str] = self.ids_to_clean_text(generated_ids[task])
             target: List[str] = self.ids_to_clean_text(batch[f"{task}_decoder_input_ids"])
-            pred_dict[task] = preds
 
             gen_metrics: Dict = self.calc_generative_metrics(preds, target)
             summ_len = np.mean(lmap(len, generated_ids))
             gen_metrics['summ_len'] = summ_len
-            self.log_dict({f'{task}_{key}': value for key, value in gen_metrics.items()})
+            gen_metrics['preds'] = preds
+            gen_metrics = {f'{task}_{key}': value for key, value in gen_metrics.items()}
+            gen_dict.update(gen_metrics)
 
-        return pred_dict
+        return gen_dict
 
     def test_step(self, batch, batch_idx):
         return self._generative_step(batch)
@@ -657,7 +673,12 @@ def main(args=None, model=None) -> GenerativeQAModule:
         else False
     )
 
-    trainer = pl.Trainer.from_argparse_args(args, default_root_dir=model.output_dir)
+    lr_monitor = LearningRateMonitor(logging_interval='step')
+    trainer = pl.Trainer.from_argparse_args(
+        args, 
+        default_root_dir=model.output_dir,
+        callbacks=[lr_monitor]
+    )
     trainer.fit(model)
 
     # trainer: pl.Trainer = generic_train(

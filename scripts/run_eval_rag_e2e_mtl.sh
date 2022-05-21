@@ -15,11 +15,11 @@ split=val
 dpr=dpr-$domain-$seg
 DATA_DIR=../data/mdd_$domain/dd-$task-$seg
 KB_FOLDER=../data/mdd_kb/knowledge_dataset-$dpr
-MODEL_PATH=$CHECKPOINTS/hps
-PRED_PATH=$MODEL_PATH/generation_step_5363_preds.txt
+MODEL_PATH=$CHECKPOINTS/hps/checkpoint5363
+# PRED_PATH=$MODEL_PATH/results.txt
 
 python rag/eval_rag.py \
---model_type rag_token_dialdoc \
+--model_type rag_token_dialdoc_mtl \
 --scoring_func $score \
 --gold_pid_path $DATA_DIR/$split.pids \
 --passages_path $KB_FOLDER/my_knowledge_dataset \
@@ -29,8 +29,9 @@ python rag/eval_rag.py \
 --model_name_or_path $MODEL_PATH \
 --eval_mode e2e \
 --evaluation_set $DATA_DIR/$split.source \
---gold_data_path $DATA_DIR/$split.target \
+--grounding_gold_data_path ../data/mdd_$domain/dd-grounding-$seg/$split.target \
+--generation_gold_data_path ../data/mdd_$domain/dd-generation-$seg/$split.target \
 --gold_data_mode ans \
---predictions_path $PRED_PATH \
---eval_batch_size 2 \
---num_beams 8
+--recalculate \
+--eval_batch_size 1 \
+--num_beams 4

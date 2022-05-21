@@ -519,7 +519,8 @@ class DialDocRagTokenForGeneration(RagTokenForGeneration):
     ):
         # set default parameters
         n_docs = n_docs if n_docs is not None else self.config.n_docs
-        num_beams = num_beams if num_beams is not None else self.config.num_beams
+        # num_beams = num_beams if num_beams is not None else self.config.num_beams
+        num_beams = 4
         num_beam_groups = num_beam_groups if num_beam_groups is not None else self.config.num_beam_groups
         max_length = max_length if max_length is not None else self.config.max_length
         num_return_sequences = (

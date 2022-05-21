@@ -2,11 +2,15 @@
 
 export PYTHONPATH="../":"${PYTHONPATH}"
 export TOKENIZERS_PARALLELISM=false
-domain=$1 # all dmv ssa va studentaid
-seg=$2 # token structure
-score=$3 # original reranking reranking_original
-task=$4 # grounding generation
-seed=$RANDOM 
+# domain=$1 # all dmv ssa va studentaid
+# seg=$2 # token structure
+# score=$3 # original reranking reranking_original
+# task=$4 # grounding generation
+domain=all
+seg=structure
+score=original
+task=generation
+seed=16
 
 dpr=dpr-$domain-$seg
 MODEL_NAME_OR_PATH=$CHECKPOINTS/rag-$dpr
@@ -19,7 +23,7 @@ python rag/finetune_rag_dialdoc.py \
     --do_marginalize 1 \
     --data_dir $DATA_DIR \
     --scoring_func $score \
-    --output_dir $CHECKPOINTS/mdd-$task-$dpr-$score \
+    --output_dir $CHECKPOINTS/generation_only \
     --model_name_or_path $MODEL_NAME_OR_PATH \
     --model_type rag_token_dialdoc \
     --index_name dialdoc \
@@ -33,8 +37,8 @@ python rag/finetune_rag_dialdoc.py \
     --n_val -1 \
     --n_test -1 \
     --n_docs 5 \
-    --train_batch_size 8 \
-    --eval_batch_size 2 \
+    --train_batch_size 1 \
+    --eval_batch_size 1 \
     --max_combined_length 300 \
     --max_source_length 128 \
     --max_target_length 50 \
@@ -48,6 +52,7 @@ python rag/finetune_rag_dialdoc.py \
     --max_grad_norm 0.1 \
     --lr_scheduler polynomial \
     --learning_rate 3e-05 \
-    --num_train_epochs 2 \
+    --num_train_epochs 5 \
     --warmup_steps 500 \
-    --gradient_accumulation_steps 1
+    --gradient_accumulation_steps 8 \
+    --val_check_interval 0.25

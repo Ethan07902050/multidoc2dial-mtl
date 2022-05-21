@@ -10,7 +10,7 @@ domain=all
 seg=structure
 score=original
 task=generation
-seed=$RANDOM 
+seed=16 
 
 dpr=dpr-$domain-$seg
 MODEL_NAME_OR_PATH=$CHECKPOINTS/rag-$dpr-mtl
@@ -23,8 +23,8 @@ python rag/finetune_rag_dialdoc_mtl.py \
     --do_marginalize 1 \
     --data_dir $DATA_DIR \
     --scoring_func $score \
-    --output_dir $CHECKPOINTS/hps-cont \
-    --model_name_or_path $CHECKPOINTS/hps/checkpoint5363 \
+    --output_dir $CHECKPOINTS/hps-epoch-5 \
+    --model_name_or_path $MODEL_NAME_OR_PATH \
     --model_type rag_token_dialdoc_mtl \
     --index_name dialdoc \
     --passages_path $KB_FOLDER/my_knowledge_dataset \
@@ -52,5 +52,6 @@ python rag/finetune_rag_dialdoc_mtl.py \
     --max_grad_norm 0.1 \
     --lr_scheduler polynomial \
     --learning_rate 3e-05 \
-    --num_train_epochs 2 \
-    --gradient_accumulation_steps 8
+    --num_train_epochs 5 \
+    --gradient_accumulation_steps 8 \
+    --val_check_interval 0.5
