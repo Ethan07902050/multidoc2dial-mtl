@@ -13,7 +13,9 @@ import numpy as np
 import pytorch_lightning as pl
 import torch
 import torch.distributed as dist
-from pytorch_lightning.accelerators.ddp_accelerator import DDPAccelerator
+import torch.nn as nn
+import torch.nn.functional as F
+# from pytorch_lightning.accelerators.ddp_accelerator import DDPAccelerator
 from pytorch_lightning.cluster_environments import TorchElasticEnvironment
 from pytorch_lightning.callbacks import LearningRateMonitor
 from torch.utils.data import DataLoader
@@ -89,26 +91,26 @@ class AttrDict(dict):
 # https://github.com/PyTorchLightning/pytorch-lightning/blob/master/tests/backends/test_accelerator_connector.py
 
 
-class CustomAccel(DDPAccelerator):
-    def __init__(self, trainer=None, **kwargs):
-        # Trainer is set later.
-        super().__init__(trainer, **kwargs)
+# class CustomAccel(DDPAccelerator):
+#     def __init__(self, trainer=None, **kwargs):
+#         # Trainer is set later.
+#         super().__init__(trainer, **kwargs)
 
-    def init_ddp_connection(self, global_rank: int, world_size: int, is_slurm_managing_tasks: bool = True):
-        logger.info("Custom init_ddp_connection.")
-        module = self.trainer.model
-        if self.cluster_environment is None:
-            self.cluster_environment = TorchElasticEnvironment()
-        self.distributed_port = module.hparams.distributed_port
-        os.environ["MASTER_PORT"] = str(self.distributed_port)
-        super().init_ddp_connection(global_rank, world_size, is_slurm_managing_tasks)
-        if module.is_rag_model:
-            if module.distributed_retriever == "pytorch":
-                module.model.rag.retriever.init_retrieval(self.distributed_port)
-            elif module.distributed_retriever == "ray" and global_rank == 0:
-                # For the Ray retriever, only initialize it once when global
-                # rank is 0.
-                module.model.rag.retriever.init_retrieval()
+#     def init_ddp_connection(self, global_rank: int, world_size: int, is_slurm_managing_tasks: bool = True):
+#         logger.info("Custom init_ddp_connection.")
+#         module = self.trainer.model
+#         if self.cluster_environment is None:
+#             self.cluster_environment = TorchElasticEnvironment()
+#         self.distributed_port = module.hparams.distributed_port
+#         os.environ["MASTER_PORT"] = str(self.distributed_port)
+#         super().init_ddp_connection(global_rank, world_size, is_slurm_managing_tasks)
+#         if module.is_rag_model:
+#             if module.distributed_retriever == "pytorch":
+#                 module.model.rag.retriever.init_retrieval(self.distributed_port)
+#             elif module.distributed_retriever == "ray" and global_rank == 0:
+#                 # For the Ray retriever, only initialize it once when global
+#                 # rank is 0.
+#                 module.model.rag.retriever.init_retrieval()
 
 
 class GenerativeQAModule(BaseTransformer):
@@ -174,7 +176,6 @@ class GenerativeQAModule(BaseTransformer):
                 retriever = RagRayDistributedRetriever.from_pretrained(
                     hparams.model_name_or_path, hparams.actor_handles, config=config
                 )
-            # import pdb; pdb.set_trace()
             model = self.model_class.from_pretrained(
                 hparams.model_name_or_path, config=config, retriever=retriever, bm25=bm25
             )
@@ -203,7 +204,7 @@ class GenerativeQAModule(BaseTransformer):
         self.metrics_save_path = Path(self.output_dir) / "metrics.json"
         self.hparams_save_path = Path(self.output_dir) / "hparams.pkl"
         pickle_save(self.hparams, self.hparams_save_path)
-        self.step_count = 0
+        # self.step_count = 0
         self.metrics = defaultdict(list)
 
         data_dir = self.hparams.data_dir
@@ -243,6 +244,18 @@ class GenerativeQAModule(BaseTransformer):
 
         self.distributed_retriever = hparams.distributed_retriever
 
+        # For manual backward
+        self.automatic_optimization = False 
+        # MTL related setup
+        self.epoch = -1
+        self.task_name = TASKS
+        self.task_num = len(TASKS)
+        self.gradient_accumulation_steps = 8
+        self.train_loss_buffer = np.zeros([self.task_num, hparams.max_epochs])
+        self.loss_scale = nn.Parameter(torch.tensor([1.0]*self.task_num, device=self.model.device))
+        # https://libmtl.readthedocs.io/en/latest/docs/user_guide/mtl.html
+        self.rep_grad = False
+
     def forward(self, input_ids, **kwargs):
         return self.model(input_ids, **kwargs)
 
@@ -252,7 +265,7 @@ class GenerativeQAModule(BaseTransformer):
         )
         return lmap(str.strip, gen_text)
 
-    def _step(self, batch: dict) -> Tuple:
+    def _step(self, batch: dict):
         source_ids, source_mask, token_type_ids, domain = (
             batch["input_ids"],
             batch["attention_mask"],
@@ -303,22 +316,172 @@ class GenerativeQAModule(BaseTransformer):
         
         grounding_loss = outputs['loss']['grounding']
         generation_loss = outputs['loss']['generation']
-        return (grounding_loss, generation_loss)
+        return torch.stack([grounding_loss, generation_loss])
 
     @property
     def pad(self) -> int:
         raise NotImplementedError("pad not implemented")
+    
+    def get_share_params(self):
+        return list(self.model.rag.question_encoder.parameters()) + list(self.model.rag.generator.model.encoder.parameters())
 
+    def zero_grad_share_params(self):
+        r"""Set gradients of the shared parameters to zero.
+        """
+        self.model.rag.question_encoder.zero_grad()
+        self.model.rag.generator.model.encoder.zero_grad()
+    
+    def _backward_new_grads(self, batch_weight, per_grads=None, grads=None):
+        r"""This function is used to reset the gradients and make a backward.
+        Args:
+            batch_weight (torch.Tensor): A tensor with size of [task_num].
+            per_grad (torch.Tensor): It is needed if ``rep_grad`` is True. The gradients of the representations.
+            grads (torch.Tensor): It is needed if ``rep_grad`` is False. The gradients of the shared parameters. 
+        """
+        if self.rep_grad:
+            if not isinstance(self.rep, dict):
+                transformed_grad = torch.einsum('i, i... -> ...', batch_weight, per_grads)
+                self.manual_backward(self.rep, transformed_grad)
+            else:
+                for tn, task in enumerate(self.task_name):
+                    rg = True if (tn+1)!=self.task_num else False
+                    self.manual_backward(self.rep[task], batch_weight[tn]*per_grads[tn], retain_graph=rg)
+        else:
+            new_grads = torch.einsum('i, i... -> ...', batch_weight, grads)
+            self._reset_grad(new_grads)
+    
+    def _compute_grad_dim(self):
+        self.grad_index = []
+        for param in self.get_share_params():
+            self.grad_index.append(param.data.numel())
+        self.grad_dim = sum(self.grad_index)
+
+    def _grad2vec(self):
+        grad = torch.zeros(self.grad_dim)
+        count = 0
+        for param in self.get_share_params():
+            if param.grad is not None:
+                beg = 0 if count == 0 else sum(self.grad_index[:count])
+                end = sum(self.grad_index[:(count+1)])
+                grad[beg:end] = param.grad.data.view(-1)
+            count += 1
+        return grad
+
+    def _compute_grad(self, losses, mode, rep_grad=False):
+        '''
+        mode: backward, autograd
+        '''
+        if not rep_grad:
+            grads = torch.zeros(self.task_num, self.grad_dim).to(self.model.device)
+            for tn in range(self.task_num):
+                if mode == 'backward':
+                    self.manual_backward(losses[tn], retain_graph=True) if (tn+1)!=self.task_num else self.manual_backward(losses[tn])
+                    grads[tn] = self._grad2vec()
+                elif mode == 'autograd':
+                    grad = list(torch.autograd.grad(losses[tn], self.get_share_params(), retain_graph=True))
+                    grads[tn] = torch.cat([g.view(-1) for g in grad])
+                else:
+                    raise ValueError('No support {} mode for gradient computation')
+                self.zero_grad_share_params()
+        else:
+            if not isinstance(self.rep, dict):
+                grads = torch.zeros(self.task_num, *self.rep.size()).to(self.model.device)
+            else:
+                grads = [torch.zeros(*self.rep[task].size()) for task in self.task_name]
+            for tn, task in enumerate(self.task_name):
+                if mode == 'backward':
+                    self.manual_backward(losses[tn], retain_graph=True) if (tn+1)!=self.task_num else self.manual_backward(losses[tn])
+                    grads[tn] = self.rep_tasks[task].grad.data.clone()
+        return grads
+    
+    def _reset_grad(self, new_grads):
+        count = 0
+        for param in self.get_share_params():
+            if param.grad is not None:
+                beg = 0 if count == 0 else sum(self.grad_index[:count])
+                end = sum(self.grad_index[:(count+1)])
+                param.grad.data = new_grads[beg:end].contiguous().view(param.data.size()).data.clone()
+            count += 1
+    
+    def _get_grads(self, losses, mode='backward'):
+        r"""This function is used to return the gradients of representations or shared parameters.
+        If ``rep_grad`` is ``True``, it returns a list with two elements. The first element is \
+        the gradients of the representations with the size of [task_num, batch_size, rep_size]. \
+        The second element is the resized gradients with size of [task_num, -1], which means \
+        the gradient of each task is resized as a vector.
+        If ``rep_grad`` is ``False``, it returns the gradients of the shared parameters with size \
+        of [task_num, -1], which means the gradient of each task is resized as a vector.
+        """
+        if self.rep_grad:
+            per_grads = self._compute_grad(losses, mode, rep_grad=True)
+            if not isinstance(self.rep, dict):
+                grads = per_grads.reshape(self.task_num, self.rep.size()[0], -1).sum(1)
+            else:
+                try:
+                    grads = torch.stack(per_grads).sum(1).view(self.task_num, -1)
+                except:
+                    raise ValueError('The representation dimensions of different tasks must be consistent')
+            return [per_grads, grads]
+        else:
+            self._compute_grad_dim()
+            grads = self._compute_grad(losses, mode)
+            return grads
+    
+    def gradnorm_backward(self, losses):
+        alpha = 1.5
+        if self.epoch >= 1:
+            loss_scale = self.task_num * F.softmax(self.loss_scale, dim=-1)
+            grads = self._get_grads(losses, mode='backward')
+            if self.rep_grad:
+                per_grads, grads = grads[0], grads[1]
+                
+            G_per_loss = torch.norm(loss_scale.unsqueeze(1)*grads, p=2, dim=-1)
+            G = G_per_loss.mean(0)
+            L_i = torch.Tensor([losses[tn].item()/self.train_loss_buffer[tn, 0] for tn in range(self.task_num)]).to(self.model.device)
+            r_i = L_i/L_i.mean()
+            constant_term = (G*(r_i**alpha)).detach()
+            L_grad = (G_per_loss-constant_term).abs().sum(0)
+            self.manual_backward(L_grad)
+            loss_weight = loss_scale.detach().clone()
+            
+            if self.rep_grad:
+                self._backward_new_grads(loss_weight, per_grads=per_grads)
+            else:
+                self._backward_new_grads(loss_weight, grads=grads)
+            return loss_weight.cpu().numpy()
+        else:
+            loss = torch.mul(losses, torch.ones_like(losses).to(self.model.device)).sum()
+            self.manual_backward(loss)
+            return np.ones(self.task_num)
+    
     def training_step(self, batch, batch_idx) -> Dict:
-        loss_tensors = self._step(batch)
+        opt = self.optimizers()
+        loss_tensors = self._step(batch) # [grounding_loss, generation_loss]
         logs = {name: loss for name, loss in zip(self.loss_names, loss_tensors)}
+        for i in range(len(TASKS)):
+            loss_tensors[i] /= self.gradient_accumulation_steps
+        weights = self.gradnorm_backward(loss_tensors)
+
+        # Log losses and weights to tensorboard
         self.log_dict(logs, prog_bar=True)
-        return loss_tensors[0] + loss_tensors[1]
+        self.log_dict({f'{task}_weight': w for task, w in zip(self.task_name, weights)})
+
+        # Gradient accumulation
+        # Ref: https://colab.research.google.com/github/kozodoi/website/blob/master/_notebooks/2021-02-19-gradient-accumulation.ipynb
+        if (batch_idx + 1) % self.gradient_accumulation_steps == 0 or (batch_idx + 1) % len(self.trainer.train_dataloader):
+            opt.step()
+            opt.zero_grad()
+
+        return loss_tensors
+
+    def training_epoch_end(self, outputs):
+        self.train_loss_buffer[:, self.epoch] = np.mean(np.array(outputs), axis=0)
 
     def validation_step(self, batch, batch_idx) -> Dict:
         return self._generative_step(batch)
 
     def validation_epoch_end(self, outputs, prefix="val") -> Dict:
+        self.epoch += 1
         metrics = {'step_count': self.global_step}
         for task in TASKS:
             file_path = self.output_dir / f'{task}_step_{self.global_step}_preds.txt'
@@ -365,9 +528,6 @@ class GenerativeQAModule(BaseTransformer):
 
         loss_tensors = self._step(batch)
         base_metrics = {name: loss for name, loss in zip(self.loss_names, loss_tensors)}
-        self.log_dict(base_metrics)
-
-        gen_dict = {}
         for task in TASKS:
             # gen_time = (time.time() - start_time) / batch["input_ids"].shape[0]
             preds: List[str] = self.ids_to_clean_text(generated_ids[task])
@@ -378,15 +538,15 @@ class GenerativeQAModule(BaseTransformer):
             gen_metrics['summ_len'] = summ_len
             gen_metrics['preds'] = preds
             gen_metrics = {f'{task}_{key}': value for key, value in gen_metrics.items()}
-            gen_dict.update(gen_metrics)
+            base_metrics.update(gen_metrics)
 
-        return gen_dict
+        return base_metrics
 
     def test_step(self, batch, batch_idx):
         return self._generative_step(batch)
 
-    # def test_epoch_end(self, outputs):
-    #     return self.validation_epoch_end(outputs, prefix="test")
+    def test_epoch_end(self, outputs):
+        return self.validation_epoch_end(outputs, prefix="test")
 
     def get_dataset(self, type_path) -> Seq2SeqDataset:
         n_obs = self.n_obs[type_path]

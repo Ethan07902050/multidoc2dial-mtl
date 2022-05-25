@@ -23,7 +23,7 @@ python rag/finetune_rag_dialdoc_mtl.py \
     --do_marginalize 1 \
     --data_dir $DATA_DIR \
     --scoring_func $score \
-    --output_dir $CHECKPOINTS/hps-epoch-5 \
+    --output_dir $CHECKPOINTS/test \
     --model_name_or_path $MODEL_NAME_OR_PATH \
     --model_type rag_token_dialdoc_mtl \
     --index_name dialdoc \
@@ -52,6 +52,6 @@ python rag/finetune_rag_dialdoc_mtl.py \
     --max_grad_norm 0.1 \
     --lr_scheduler polynomial \
     --learning_rate 3e-05 \
-    --num_train_epochs 5 \
-    --gradient_accumulation_steps 8 \
-    --val_check_interval 0.5
+    --num_train_epochs 4 \
+    --val_check_interval 0.5 \
+    --gradient_clip_val 0
