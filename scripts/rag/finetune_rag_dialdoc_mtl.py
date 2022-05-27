@@ -16,7 +16,7 @@ import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 # from pytorch_lightning.accelerators.ddp_accelerator import DDPAccelerator
-from pytorch_lightning.cluster_environments import TorchElasticEnvironment
+# from pytorch_lightning.cluster_environments import TorchElasticEnvironment
 from pytorch_lightning.callbacks import LearningRateMonitor
 from torch.utils.data import DataLoader
 
@@ -246,13 +246,18 @@ class GenerativeQAModule(BaseTransformer):
 
         # For manual backward
         self.automatic_optimization = False 
+
+        # Gradient accumulation
+        self.gradient_accumulation_steps = 8
+        self.accumulated_loss = [0] * len(TASKS)
+
         # MTL related setup
-        self.epoch = -1
+        self.epoch = 0
         self.task_name = TASKS
         self.task_num = len(TASKS)
-        self.gradient_accumulation_steps = 8
         self.train_loss_buffer = np.zeros([self.task_num, hparams.max_epochs])
-        self.loss_scale = nn.Parameter(torch.tensor([1.0]*self.task_num, device=self.model.device))
+        self.loss_scale = nn.Parameter(torch.tensor([1.0]*self.task_num, device=self.device))
+        
         # https://libmtl.readthedocs.io/en/latest/docs/user_guide/mtl.html
         self.rep_grad = False
 
@@ -372,7 +377,7 @@ class GenerativeQAModule(BaseTransformer):
         mode: backward, autograd
         '''
         if not rep_grad:
-            grads = torch.zeros(self.task_num, self.grad_dim).to(self.model.device)
+            grads = torch.zeros(self.task_num, self.grad_dim).to(self.device)
             for tn in range(self.task_num):
                 if mode == 'backward':
                     self.manual_backward(losses[tn], retain_graph=True) if (tn+1)!=self.task_num else self.manual_backward(losses[tn])
@@ -385,7 +390,7 @@ class GenerativeQAModule(BaseTransformer):
                 self.zero_grad_share_params()
         else:
             if not isinstance(self.rep, dict):
-                grads = torch.zeros(self.task_num, *self.rep.size()).to(self.model.device)
+                grads = torch.zeros(self.task_num, *self.rep.size()).to(self.device)
             else:
                 grads = [torch.zeros(*self.rep[task].size()) for task in self.task_name]
             for tn, task in enumerate(self.task_name):
@@ -437,7 +442,7 @@ class GenerativeQAModule(BaseTransformer):
                 
             G_per_loss = torch.norm(loss_scale.unsqueeze(1)*grads, p=2, dim=-1)
             G = G_per_loss.mean(0)
-            L_i = torch.Tensor([losses[tn].item()/self.train_loss_buffer[tn, 0] for tn in range(self.task_num)]).to(self.model.device)
+            L_i = torch.Tensor([losses[tn].item()/self.train_loss_buffer[tn, 0] for tn in range(self.task_num)]).to(self.device)
             r_i = L_i/L_i.mean()
             constant_term = (G*(r_i**alpha)).detach()
             L_grad = (G_per_loss-constant_term).abs().sum(0)
@@ -450,38 +455,47 @@ class GenerativeQAModule(BaseTransformer):
                 self._backward_new_grads(loss_weight, grads=grads)
             return loss_weight.cpu().numpy()
         else:
-            loss = torch.mul(losses, torch.ones_like(losses).to(self.model.device)).sum()
+            loss = torch.mul(losses, torch.ones_like(losses).to(self.device)).sum()
             self.manual_backward(loss)
             return np.ones(self.task_num)
     
     def training_step(self, batch, batch_idx) -> Dict:
         opt = self.optimizers()
+        sch = self.lr_schedulers()
         loss_tensors = self._step(batch) # [grounding_loss, generation_loss]
-        logs = {name: loss for name, loss in zip(self.loss_names, loss_tensors)}
+        
         for i in range(len(TASKS)):
             loss_tensors[i] /= self.gradient_accumulation_steps
-        weights = self.gradnorm_backward(loss_tensors)
+            self.accumulated_loss[i] += loss_tensors[i].item()
 
-        # Log losses and weights to tensorboard
-        self.log_dict(logs, prog_bar=True)
+        # Log weights to tensorboard
+        weights = self.gradnorm_backward(loss_tensors)
         self.log_dict({f'{task}_weight': w for task, w in zip(self.task_name, weights)})
 
         # Gradient accumulation
         # Ref: https://colab.research.google.com/github/kozodoi/website/blob/master/_notebooks/2021-02-19-gradient-accumulation.ipynb
-        if (batch_idx + 1) % self.gradient_accumulation_steps == 0 or (batch_idx + 1) % len(self.trainer.train_dataloader):
+        if (batch_idx + 1) % self.gradient_accumulation_steps == 0 or (batch_idx + 1) == len(self.trainer.train_dataloader):
+            logs = {name: loss for name, loss in zip(self.loss_names, self.accumulated_loss)}
+            self.log_dict(logs, prog_bar=True)
+            self.accumulated_loss = [0] * len(TASKS)
+            
+            # Gradient clipping
+            nn.utils.clip_grad_value_(self.model.parameters(), clip_value=0.1)
             opt.step()
             opt.zero_grad()
+            sch.step()
 
         return loss_tensors
 
     def training_epoch_end(self, outputs):
-        self.train_loss_buffer[:, self.epoch] = np.mean(np.array(outputs), axis=0)
+        losses = [x['loss'].cpu().detach().numpy() for x in outputs]
+        self.train_loss_buffer[:, self.epoch] = np.mean(losses, axis=0)
+        self.epoch += 1
 
     def validation_step(self, batch, batch_idx) -> Dict:
         return self._generative_step(batch)
 
     def validation_epoch_end(self, outputs, prefix="val") -> Dict:
-        self.epoch += 1
         metrics = {'step_count': self.global_step}
         for task in TASKS:
             file_path = self.output_dir / f'{task}_step_{self.global_step}_preds.txt'
@@ -513,7 +527,7 @@ class GenerativeQAModule(BaseTransformer):
         if "domain" in batch:
             domain = batch["domain"]
             del batch["domain"]
-        batch = BatchEncoding(batch).to(device=self.model.device)
+        batch = BatchEncoding(batch).to(device=self.device)
         batch["domain"] = domain
         generated_ids = self.model.generate(
             batch["input_ids"],
