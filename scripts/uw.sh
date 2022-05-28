@@ -23,7 +23,7 @@ python rag/finetune_rag_dialdoc_mtl.py \
     --do_marginalize 1 \
     --data_dir $DATA_DIR \
     --scoring_func $score \
-    --output_dir $CHECKPOINTS/linear \
+    --output_dir $CHECKPOINTS/uw \
     --model_name_or_path $MODEL_NAME_OR_PATH \
     --model_type rag_token_dialdoc_mtl \
     --index_name dialdoc \
@@ -55,4 +55,4 @@ python rag/finetune_rag_dialdoc_mtl.py \
     --num_train_epochs 4 \
     --val_check_interval 0.25 \
     --gradient_accumulation_steps 8 \
-    --weighting_strategy linear
+    --weighting_strategy uw

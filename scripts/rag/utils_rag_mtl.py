@@ -126,6 +126,8 @@ class Seq2SeqDataset(Dataset):
         self.max_target_length = max_target_length
         self.tokenizer = tokenizer
         self.prefix = prefix
+        if n_obs is not None:
+            self.src_lens = self.src_lens[:n_obs]
         self.src_lang = src_lang
         self.tgt_lang = tgt_lang
 
