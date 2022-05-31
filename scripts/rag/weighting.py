@@ -134,42 +134,11 @@ class UW(GenerativeQAModule):
         return loss
 
 class EW(GenerativeQAModule):
-    def __init__(self, hparams, **kwargs):
-        super().__init__(hparams, **kwargs)
-        self._batch_loss_value = [0] * self.task_num
-        self._running_loss = [[], []]
-        self.gradient_accumulation_steps = hparams.accumulate_grad_batches
-
-    def training_step(self, batch, batch_idx):
-        loss_tensors = self._step(batch)
-        for i in range(self.task_num):
-            self._batch_loss_value[i] += (loss_tensors[i].item() / self.gradient_accumulation_steps)
-
-        if (batch_idx + 1) % self.gradient_accumulation_steps == 0:
-            for i in range(self.task_num):
-                self._running_loss[i].append(self._batch_loss_value[i])
-                self._batch_loss_value[i] = 0
-                self.log(f'{self.abb_names[i]}_loss', np.mean(self._running_loss[i][-100:]), prog_bar=True)
-
-        return torch.sum(loss_tensors)
+    def combine_loss(self, loss_tensors):
+        return torch.sum(loss_tensors)        
 
 class GenerationOnly(GenerativeQAModule):
-    def __init__(self, hparams, **kwargs):
-        super().__init__(hparams, **kwargs)
-        self._batch_loss_value = 0
-        self._running_loss = []
-        self.gradient_accumulation_steps = hparams.accumulate_grad_batches
-
-    def training_step(self, batch, batch_idx):
-        loss_tensors = self._step(batch)
-        self._batch_loss_value += (loss_tensors[1].item() / self.gradient_accumulation_steps)
-        
-        if (batch_idx + 1) % self.gradient_accumulation_steps == 0:
-            self._running_loss.append(self._batch_loss_value)
-            self._batch_loss_value = 0
-            # Ref: https://github.com/PyTorchLightning/pytorch-lightning/blob/3be81cb54ebf2b5425cae09327e852bea0e7c492/pytorch_lightning/trainer/training_loop.py#L598
-            self.log('gt_loss', np.mean(self._running_loss[-100:]), prog_bar=True)
-
+    def combine_loss(self, loss_tensors):
         return loss_tensors[1]
 
 class Linear(GenerativeQAModule):
@@ -180,19 +149,13 @@ class Linear(GenerativeQAModule):
         total_steps = math.ceil(dataset_size // hparams.train_batch_size) * hparams.max_epochs
         self.delta = 1 / total_steps
     
-    def training_step(self, batch, batch_idx):
-        loss_tensors = self._step(batch)
-        loss = torch.dot(loss_tensors, self.weight.to(self.device))
-
-        # Log weights and losses to tensorboard
+    def combine_loss(self, loss_tensors):
         weight_log = {f'{task}_weight': w for task, w in zip(self.abb_names, self.weight)}
-        loss_log = {f'{task}_loss': loss for task, loss in zip(self.abb_names, loss_tensors)}
         self.log_dict(weight_log, prog_bar=True)
-        self.log_dict(loss_log, prog_bar=True)
-
+        loss = torch.dot(loss_tensors, self.weight.to(self.device))
         self.weight[0] -= self.delta
         self.weight[1] += self.delta
-        return loss        
+        return loss      
 
 
 class GradNorm(AbsWeighting):

@@ -219,6 +219,11 @@ class GenerativeQAModule(BaseTransformer):
         self.task_name = TASKS
         self.task_num = len(TASKS)
 
+        # Loss smoothing
+        self._batch_loss_value = [0] * self.task_num
+        self._running_loss = [[], []]
+        self.gradient_accumulation_steps = hparams.accumulate_grad_batches
+
     def forward(self, input_ids, **kwargs):
         return self.model(input_ids, **kwargs)
 
@@ -286,7 +291,17 @@ class GenerativeQAModule(BaseTransformer):
         raise NotImplementedError("pad not implemented")
     
     def training_step(self, batch, batch_idx) -> Dict:
-        pass
+        loss_tensors = self._step(batch)
+        for i in range(self.task_num):
+            self._batch_loss_value[i] += (loss_tensors[i].item() / self.gradient_accumulation_steps)
+
+        if (batch_idx + 1) % self.gradient_accumulation_steps == 0:
+            for i in range(self.task_num):
+                self._running_loss[i].append(self._batch_loss_value[i])
+                self._batch_loss_value[i] = 0
+                self.log(f'{self.abb_names[i]}_loss', np.mean(self._running_loss[i][-100:]), prog_bar=True)
+
+        return self.combine_loss(loss_tensors)
 
     def validation_step(self, batch, batch_idx) -> Dict:
         return self._generative_step(batch)
