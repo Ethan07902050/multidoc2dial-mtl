@@ -47,7 +47,7 @@ from utils_rag import (
 sys.path.insert(2, str(Path(__file__).resolve().parents[1]))
 from lightning_base import BaseTransformer, add_generic_args, generic_train  # noqa
 from generative_qa import GenerativeQAModule
-from weighting import UW, GradNorm, Linear
+from weighting import UW, EW, GradNorm, Linear, GenerationOnly
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -113,10 +113,14 @@ def main(args=None, model=None):
     if model is None:
         if args.weighting_strategy == 'uw':
             model = UW(args)
+        elif args.weighting_strategy == 'ew':
+            model = EW(args)
         elif args.weighting_strategy == 'gradnorm':
             model = GradNorm(args)
         elif args.weighting_strategy == 'linear':
             model = Linear(args)
+        elif args.weighting_strategy == 'generation-only':
+            model = GenerationOnly(args)
 
     # dataset = Path(args.data_dir).name
     if (

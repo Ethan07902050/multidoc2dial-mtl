@@ -52,7 +52,7 @@ python rag/finetune_rag_dialdoc.py \
     --max_grad_norm 0.1 \
     --lr_scheduler polynomial \
     --learning_rate 3e-05 \
-    --num_train_epochs 5 \
+    --num_train_epochs 4 \
     --warmup_steps 500 \
     --gradient_accumulation_steps 8 \
-    --val_check_interval 0.25
+    --val_check_interval 0.5

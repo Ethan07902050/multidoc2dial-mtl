@@ -20,7 +20,7 @@ sys.path.append(os.path.join(os.getcwd()))  # noqa: E402 # isort:skip
 from utils_rag import exact_match_score, f1_score, load_bm25  # noqa: E402 # isort:skip
 from dialdoc.models.rag.modeling_rag_dialdoc import DialDocRagTokenForGeneration
 from dialdoc.models.rag.retrieval_rag_dialdoc import DialDocRagRetriever
-
+from dialdoc.models.rag.modeling_rag_dialdoc_mtl import DialDocRagTokenForGenerationMTL
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -306,7 +306,7 @@ def get_args():
     )
     parser.add_argument(
         "--model_type",
-        choices=["rag_sequence", "rag_token", "rag_token_dialdoc", "bart"],
+        choices=["rag_token_dialdoc_mtl", "rag_sequence", "rag_token", "rag_token_dialdoc", "bart"],
         type=str,
         help="RAG model type: rag_sequence, rag_token or bart, if none specified, the type is inferred from the model_name_or_path",
     )
@@ -445,6 +445,8 @@ def main(args):
             model_class = RagTokenForGeneration
         elif args.model_type == "rag_token_dialdoc":
             model_class = DialDocRagTokenForGeneration
+        elif args.model_type == "rag_token_dialdoc_mtl":
+            model_class = DialDocRagTokenForGenerationMTL
         else:
             model_class = RagSequenceForGeneration
         model_kwargs["n_docs"] = args.n_docs
@@ -475,10 +477,10 @@ def main(args):
     evaluate_batch_fn = evaluate_batch_e2e if args.eval_mode == "e2e" else evaluate_batch_retrieval
 
     for checkpoint in checkpoints:
-        # if os.path.exists(args.predictions_path) and (not args.recalculate):
-        #     logger.info("Calculating metrics based on an existing predictions file: {}".format(args.predictions_path))
-        #     score_fn(args, args.predictions_path, args.gold_data_path)
-        #     continue
+        if os.path.exists(args.predictions_path) and (not args.recalculate):
+            logger.info("Calculating metrics based on an existing predictions file: {}".format(args.predictions_path))
+            score_fn(args, args.predictions_path, args.gold_data_path)
+            continue
 
         logger.info("***** Running evaluation for {} *****".format(checkpoint))
         logger.info("  Predictions will be stored under {}".format(args.model_name_or_path))
@@ -543,14 +545,14 @@ def main(args):
                     answers = evaluate_batch_fn(args, model, new_questions)
                     for task in TASKS:
                         preds_file[task].write("\n".join(answers[task]) + "\n")
-                        preds_file.flush()
+                        preds_file[task].flush()
                     questions = []
             if len(questions) > 0:
                 new_questions = list(tuple(question.split("[SEP]")) for question in questions)
                 answers = evaluate_batch_fn(args, model, new_questions)
                 for task in TASKS:
-                    preds_file.write("\n".join(answers[task]))
-                    preds_file.flush()
+                    preds_file[task].write("\n".join(answers[task]))
+                    preds_file[task].flush()
 
         eval_file.close()
         for task in TASKS:

@@ -300,9 +300,9 @@ class GenerativeQAModule(BaseTransformer):
                     for line in x[f'{task}_preds']:
                         f.write(f'{line}\n')
 
-            for metric in self.metric_names:
-                key = f'{task}_{metric}'
-                metrics[key] = np.mean([x[key] for x in outputs])
+            for key in outputs[0].keys():
+                if 'preds' not in key:
+                    metrics[key] = np.mean([x[key] for x in outputs])
 
         self.save_metrics(metrics, prefix)
 
@@ -337,7 +337,7 @@ class GenerativeQAModule(BaseTransformer):
         )
 
         loss_tensors = self._step(batch)
-        base_metrics = {name: loss for name, loss in zip(self.loss_names, loss_tensors)}
+        base_metrics = {name: loss.item() for name, loss in zip(self.loss_names, loss_tensors)}
         for task in TASKS:
             # gen_time = (time.time() - start_time) / batch["input_ids"].shape[0]
             preds: List[str] = self.ids_to_clean_text(generated_ids[task])
@@ -486,7 +486,7 @@ class GenerativeQAModule(BaseTransformer):
         )
         parser.add_argument(
             "--weighting_strategy",
-            choices=["ew", "dwa", "uw", "gradnorm", "linear"],
+            choices=["ew", "dwa", "uw", "gradnorm", "linear", "generation-only"],
             type=str,
         )
         return parser

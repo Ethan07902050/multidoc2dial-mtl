@@ -13,8 +13,8 @@ import numpy as np
 import pytorch_lightning as pl
 import torch
 import torch.distributed as dist
-from pytorch_lightning.accelerators.ddp_accelerator import DDPAccelerator
-from pytorch_lightning.cluster_environments import TorchElasticEnvironment
+# from pytorch_lightning.accelerators.ddp_accelerator import DDPAccelerator
+# from pytorch_lightning.cluster_environments import TorchElasticEnvironment
 from torch.utils.data import DataLoader
 
 from transformers import (
@@ -84,26 +84,26 @@ class AttrDict(dict):
 # https://github.com/PyTorchLightning/pytorch-lightning/blob/master/tests/backends/test_accelerator_connector.py
 
 
-class CustomAccel(DDPAccelerator):
-    def __init__(self, trainer=None, **kwargs):
-        # Trainer is set later.
-        super().__init__(trainer, **kwargs)
+# class CustomAccel(DDPAccelerator):
+#     def __init__(self, trainer=None, **kwargs):
+#         # Trainer is set later.
+#         super().__init__(trainer, **kwargs)
 
-    def init_ddp_connection(self, global_rank: int, world_size: int, is_slurm_managing_tasks: bool = True):
-        logger.info("Custom init_ddp_connection.")
-        module = self.trainer.model
-        if self.cluster_environment is None:
-            self.cluster_environment = TorchElasticEnvironment()
-        self.distributed_port = module.hparams.distributed_port
-        os.environ["MASTER_PORT"] = str(self.distributed_port)
-        super().init_ddp_connection(global_rank, world_size, is_slurm_managing_tasks)
-        if module.is_rag_model:
-            if module.distributed_retriever == "pytorch":
-                module.model.rag.retriever.init_retrieval(self.distributed_port)
-            elif module.distributed_retriever == "ray" and global_rank == 0:
-                # For the Ray retriever, only initialize it once when global
-                # rank is 0.
-                module.model.rag.retriever.init_retrieval()
+#     def init_ddp_connection(self, global_rank: int, world_size: int, is_slurm_managing_tasks: bool = True):
+#         logger.info("Custom init_ddp_connection.")
+#         module = self.trainer.model
+#         if self.cluster_environment is None:
+#             self.cluster_environment = TorchElasticEnvironment()
+#         self.distributed_port = module.hparams.distributed_port
+#         os.environ["MASTER_PORT"] = str(self.distributed_port)
+#         super().init_ddp_connection(global_rank, world_size, is_slurm_managing_tasks)
+#         if module.is_rag_model:
+#             if module.distributed_retriever == "pytorch":
+#                 module.model.rag.retriever.init_retrieval(self.distributed_port)
+#             elif module.distributed_retriever == "ray" and global_rank == 0:
+#                 # For the Ray retriever, only initialize it once when global
+#                 # rank is 0.
+#                 module.model.rag.retriever.init_retrieval()
 
 
 class GenerativeQAModule(BaseTransformer):
@@ -298,6 +298,7 @@ class GenerativeQAModule(BaseTransformer):
 
     def training_step(self, batch, batch_idx) -> Dict:
         loss_tensors = self._step(batch)
+        # self.log("loss", loss_tensors[0], cprog_bar=True)
 
         logs = {name: loss for name, loss in zip(self.loss_names, loss_tensors)}
         # tokens per batch

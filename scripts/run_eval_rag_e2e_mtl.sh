@@ -15,10 +15,10 @@ split=val
 dpr=dpr-$domain-$seg
 DATA_DIR=../data/mdd_$domain/dd-$task-$seg
 KB_FOLDER=../data/mdd_kb/knowledge_dataset-$dpr
-MODEL_PATH=$CHECKPOINTS/hps/checkpoint5363
+MODEL_PATH=$CHECKPOINTS/linear/checkpoint8045
 # PRED_PATH=$MODEL_PATH/results.txt
 
-python rag/eval_rag.py \
+python rag/eval_rag_mtl.py \
 --model_type rag_token_dialdoc_mtl \
 --scoring_func $score \
 --gold_pid_path $DATA_DIR/$split.pids \
@@ -34,4 +34,5 @@ python rag/eval_rag.py \
 --gold_data_mode ans \
 --recalculate \
 --eval_batch_size 1 \
---num_beams 4
+--num_beams 1 \
+--max_length 128

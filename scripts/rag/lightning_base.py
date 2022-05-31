@@ -372,9 +372,9 @@ def generic_train(
     train_params = {}
 
     # TODO: remove with PyTorch 1.6 since pl uses native amp
-    if args.fp16:
-        train_params["precision"] = 16
-        train_params["amp_level"] = args.fp16_opt_level
+    # if args.fp16:
+    #     train_params["precision"] = 16
+    #     train_params["amp_level"] = args.fp16_opt_level
 
     if args.gpus > 1:
         train_params["distributed_backend"] = "ddp"
