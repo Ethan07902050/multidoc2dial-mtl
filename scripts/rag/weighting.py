@@ -155,8 +155,43 @@ class Linear(GenerativeQAModule):
         loss = torch.dot(loss_tensors, self.weight.to(self.device))
         self.weight[0] -= self.delta
         self.weight[1] += self.delta
-        return loss      
+        return loss
 
+class RLW(GenerativeQAModule):      
+    def combine_loss(self, loss_tensors):
+        weight = F.softmax(torch.randn(self.task_num), dim=-1)
+        weight_log = {f'{task}_weight': w.item() for task, w in zip(self.abb_names, weight)}
+        self.log_dict(weight_log, prog_bar=True)
+        loss = torch.mul(loss_tensors, weight.to(self.device)).sum()
+        return loss
+
+class DWA(GenerativeQAModule):
+    def __init__(self, hparams, **kwargs):
+        super().__init__(hparams, **kwargs)
+        self.epoch = 0
+        self.loss_list = []
+        self.train_loss_buffer = np.zeros([self.task_num, hparams.max_epochs])
+        self.T = 2.0
+
+    def combine_loss(self, loss_tensors):
+        self.loss_list.append(loss_tensors)
+        if self.epoch > 1:
+            w_i = torch.Tensor(self.train_loss_buffer[:,self.epoch-1]/self.train_loss_buffer[:,self.epoch-2]).to(self.device)
+            batch_weight = self.task_num*F.softmax(w_i/self.T, dim=-1)
+        else:
+            batch_weight = torch.ones_like(loss_tensors).to(self.device)
+
+        weight_log = {f'{task}_weight': w.item() for task, w in zip(self.abb_names, batch_weight)}
+        self.log_dict(weight_log, prog_bar=True)
+
+        loss = torch.mul(loss_tensors, batch_weight).sum()
+        return loss
+
+    def training_epoch_end(self, outputs):
+        losses = [x.cpu().detach().numpy() for x in self.loss_list]
+        self.train_loss_buffer[:, self.epoch] = np.mean(losses, axis=0)
+        self.epoch += 1
+        self.loss_list = []
 
 class GradNorm(AbsWeighting):
     def __init__(self, hparams, **kwargs):

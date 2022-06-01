@@ -501,7 +501,7 @@ class GenerativeQAModule(BaseTransformer):
         )
         parser.add_argument(
             "--weighting_strategy",
-            choices=["ew", "dwa", "uw", "gradnorm", "linear", "generation-only"],
+            choices=["ew", "dwa", "uw", "gradnorm", "linear", "generation-only", "rlw"],
             type=str,
         )
         return parser
