@@ -118,19 +118,13 @@ class AbsWeighting(GenerativeQAModule):
 class UW(GenerativeQAModule):
     def __init__(self, hparams, **kwargs):
         super().__init__(hparams, **kwargs)
-        self.loss_scale = nn.Parameter(torch.tensor([-0.5]*self.task_num, device=self.device))
+        self.model.loss_scale = nn.Parameter(torch.tensor([-0.5]*self.task_num, device=self.device))
     
-    def training_step(self, batch, batch_idx):
-        loss_tensors = self._step(batch)
-        loss = (loss_tensors/(2*self.loss_scale.exp())+self.loss_scale/2).sum()
-        weights = (1/(2*torch.exp(self.loss_scale))).detach().cpu().numpy()
-
-        # Log weights and losses to tensorboard
+    def combine_loss(self, loss_tensors):
+        loss = (loss_tensors/(2*self.model.loss_scale.exp())+self.model.loss_scale/2).sum()
+        weights = (1/(2*torch.exp(self.model.loss_scale))).detach().cpu().numpy()
         weight_log = {f'{task}_weight': w for task, w in zip(self.abb_names, weights)}
-        loss_log = {f'{task}_loss': loss for task, loss in zip(self.abb_names, loss_tensors)}
         self.log_dict(weight_log, prog_bar=True)
-        self.log_dict(loss_log, prog_bar=True)
-
         return loss
 
 class EW(GenerativeQAModule):
@@ -202,10 +196,9 @@ class GradNorm(AbsWeighting):
 
         # Gradient accumulation
         self.gradient_accumulation_steps = 8
-        self.accumulated_loss = [0] * self.task_num
 
         self.epoch = 0
-        self.loss_scale = nn.Parameter(torch.tensor([1.0]*self.task_num, device=self.device))
+        self.model.loss_scale = nn.Parameter(torch.tensor([1.0]*self.task_num, device=self.device))
         self.train_loss_buffer = np.zeros([self.task_num, hparams.max_epochs])
         
         # https://libmtl.readthedocs.io/en/latest/docs/user_guide/mtl.html
@@ -214,7 +207,7 @@ class GradNorm(AbsWeighting):
     def gradnorm_backward(self, losses):
         alpha = 1.5
         if self.epoch >= 1:
-            loss_scale = self.task_num * F.softmax(self.loss_scale, dim=-1)
+            loss_scale = self.task_num * F.softmax(self.model.loss_scale, dim=-1)
             grads = self._get_grads(losses, mode='backward')
             if self.rep_grad:
                 per_grads, grads = grads[0], grads[1]
@@ -245,7 +238,7 @@ class GradNorm(AbsWeighting):
         
         for i in range(self.task_num):
             loss_tensors[i] /= self.gradient_accumulation_steps
-            self.accumulated_loss[i] += loss_tensors[i].item()
+            self._batch_loss_value[i] += loss_tensors[i].item()
 
         # Log weights to tensorboard
         weights = self.gradnorm_backward(loss_tensors)
@@ -254,10 +247,11 @@ class GradNorm(AbsWeighting):
         # Gradient accumulation
         # Ref: https://colab.research.google.com/github/kozodoi/website/blob/master/_notebooks/2021-02-19-gradient-accumulation.ipynb
         if (batch_idx + 1) % self.gradient_accumulation_steps == 0 or (batch_idx + 1) == len(self.trainer.train_dataloader):
-            logs = {f'{name}_loss': loss for name, loss in zip(self.abb_names, self.accumulated_loss)}
-            self.log_dict(logs, prog_bar=True)
-            self.accumulated_loss = [0] * self.task_num
-            
+            for i in range(self.task_num):
+                self._running_loss[i].append(self._batch_loss_value[i])
+                self._batch_loss_value[i] = 0
+                self.log(f'{self.abb_names[i]}_loss', np.mean(self._running_loss[i][-100:]), prog_bar=True)
+
             # Gradient clipping
             nn.utils.clip_grad_value_(self.model.parameters(), clip_value=0.1)
             opt.step()
